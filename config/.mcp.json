@@ -6,8 +6,8 @@
       "env": {
         "CSMAR_API_BASE": "https://api.gtarsc.com",
         "CSMAR_API_KEY": "",
-        "CSMAR_USERNAME": "13303736417",
-        "CSMAR_PASSWORD": "wsy030225",
+        "CSMAR_USERNAME": "your username",
+        "CSMAR_PASSWORD": "your password",
         "CSMAR_LANG": "0"
       }
     }
