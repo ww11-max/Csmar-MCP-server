@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MCP Protocol](https://img.shields.io/badge/MCP-Protocol-blue)](https://spec.modelcontextprotocol.io)
+[![Node.js](https://img.shields.io/badge/Node.js-18+-green)](https://nodejs.org)
+[![Python](https://img.shields.io/badge/Python-3.8+-green)](https://www.python.org)
 
 国泰安（CSMAR）金融数据库的 Model Context Protocol (MCP) 服务器，支持在 Claude Code 中直接访问 CSMAR 金融数据。
 
@@ -10,6 +12,10 @@
 - **完整的 CSMAR 数据访问**：支持 240+ 个数据库，包括财务报表、股票交易、公司信息等
 - **智能登录管理**：支持环境变量自动登录和令牌缓存
 - **11 个 MCP 工具**：涵盖数据库探索、数据查询、预览等全功能
+- **持久化 Python 进程**：复用 Python 会话，大幅提升性能
+- **请求重试机制**：网络不稳定时自动重试
+- **优雅关闭**：支持 SIGTERM/SIGINT 信号
+- **健康检查**：随时查看服务状态
 - **Python 中间层**：基于 CSMAR-PYTHON SDK 的稳定封装
 - **配置简单**：一键式配置，支持 Claude Code 原生集成
 
@@ -23,35 +29,55 @@
 ## 🚀 快速开始
 
 ### 1. 克隆项目
+
 ```bash
-git clone https://github.com/yourusername/csmar-mcp-server.git
-cd csmar-mcp-server
+git clone https://github.com/ww11-max/Csmar-MCP-server.git
+cd Csmar-MCP-server
 ```
 
 ### 2. 安装依赖
+
 ```bash
 npm install
 ```
 
 ### 3. 配置环境变量
-复制配置文件模板：
-```bash
-cp config/.env.example .env
-```
 
-编辑 `.env` 文件，填入你的 CSMAR 账号信息：
+在项目根目录创建 `.env` 文件：
+
 ```env
+# CSMAR 配置
 CSMAR_API_BASE=https://api.gtarsc.com
-CSMAR_API_KEY=你的API密钥（如有）
 CSMAR_USERNAME=你的CSMAR用户名
 CSMAR_PASSWORD=你的CSMAR密码
 CSMAR_LANG=0  # 0=中文, 1=英文
 ```
 
+> ⚠️ **安全提示**：请勿将 `.env` 文件提交到 Git！已配置 `.gitignore` 自动忽略。
+
 ### 4. 配置 Claude Code
+
 在 Claude Code 的配置文件中添加 MCP 服务器配置：
 
 **Windows** (`%APPDATA%/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "csmar": {
+      "command": "node",
+      "args": ["C:\\path\\to\\Csmar-MCP-server\\src\\index.js"],
+      "env": {
+        "CSMAR_API_BASE": "https://api.gtarsc.com",
+        "CSMAR_USERNAME": "你的CSMAR用户名",
+        "CSMAR_PASSWORD": "你的CSMAR密码",
+        "CSMAR_LANG": "0"
+      }
+    }
+  }
+}
+```
+
 **macOS/Linux** (`~/.config/Claude/claude_desktop_config.json`):
 
 ```json
@@ -59,7 +85,7 @@ CSMAR_LANG=0  # 0=中文, 1=英文
   "mcpServers": {
     "csmar": {
       "command": "node",
-      "args": ["/path/to/csmar-mcp-server/src/index.js"],
+      "args": ["/path/to/Csmar-MCP-server/src/index.js"],
       "env": {
         "CSMAR_API_BASE": "https://api.gtarsc.com",
         "CSMAR_USERNAME": "你的CSMAR用户名",
@@ -72,19 +98,19 @@ CSMAR_LANG=0  # 0=中文, 1=英文
 ```
 
 ### 5. 重启 Claude Code
+
 重启 Claude Code 以加载 MCP 服务器。
 
 ## 🔧 使用方法
 
 ### 验证安装
-在 Claude Code 中运行：
+
 ```python
-mcp__csmar__csmar_list_databases()
+mcp__csmar__csmar_health_check()
 ```
 
-如果看到数据库列表，说明安装成功！
-
 ### 基本数据探索
+
 ```python
 # 列出所有可用数据库（约240个）
 mcp__csmar__csmar_list_databases()
@@ -100,6 +126,7 @@ mcp__csmar__csmar_preview(table_name="FS_Combas")
 ```
 
 ### 数据查询示例
+
 ```python
 # 查询财务报表数据
 mcp__csmar__csmar_query(
@@ -118,12 +145,32 @@ mcp__csmar__csmar_query_count(
     start_time="2020-01-01",
     end_time="2021-12-31"
 )
+
+# 获取股票数据
+mcp__csmar__get_stock_data(
+    stock_code="000001",
+    start_date="2024-01-01",
+    end_date="2024-12-31",
+    frequency="daily"
+)
+
+# 获取财务数据
+mcp__csmar__get_financial_data(
+    stock_code="000001",
+    start_date="2020-01-01",
+    end_date="2024-12-31",
+    indicators=["A001000000", "A002000000"]
+)
+
+# 获取公司信息
+mcp__csmar__get_company_info(stock_code="000001")
 ```
 
 ## 🛠️ 可用工具
 
 | 工具名称 | 描述 | 参数 |
 |---------|------|------|
+| `csmar_health_check` | 检查服务健康状态 | 无 |
 | `csmar_login` | 登录 CSMAR 账户 | `account`, `pwd`, `lang` |
 | `csmar_list_databases` | 列出可访问的数据库 | 无 |
 | `csmar_list_tables` | 列出数据库中的表 | `database_name` |
@@ -177,16 +224,17 @@ csmar-mcp-server/
 - **时间格式**：必须使用 "YYYY-MM-DD" 格式
 
 ### 分页查询示例
+
 ```python
 # 第1页
-条件 = "Stkcd like '3%' limit 0,200000"
+condition = "Stkcd like '3%' limit 0,200000"
 # 第2页
-条件 = "Stkcd like '3%' limit 200000,200000"
+condition = "Stkcd like '3%' limit 200000,200000"
 
 mcp__csmar__csmar_query(
     table_name="FS_Combas",
     columns=["Stkcd", "ShortName", "Accper", "Typrep"],
-    condition=条件
+    condition=condition
 )
 ```
 
@@ -196,10 +244,10 @@ mcp__csmar__csmar_query(
 
 #### 1. "MCP 服务器未响应"
 - 确认 Claude Code 已重启
-- 检查 `.mcp.json` 文件路径
+- 检查配置文件路径是否正确
 - 手动测试 Python 客户端：
   ```bash
-  echo '{"action":"list_databases","params":{}}' | python src/python_client.py
+  echo '{"action":"check_availability","params":{}}' | python src/python_client.py --once
   ```
 
 #### 2. "数据库不存在"
@@ -214,13 +262,25 @@ mcp__csmar__csmar_query(
 
 #### 4. CSMAR SDK 导入失败
 - 确认 CSMAR-PYTHON SDK 已正确安装
-- 检查 Python 路径配置
-- 查看 `src/python_client.py` 中的路径设置
+- 运行 `python src/python_client.py` 查看详细错误信息
 
 ### 日志文件
-- **CSMAR 日志**：`csmar-log.log`
 - **Python 客户端日志**：通过 stderr 输出
 - **MCP 服务器日志**：通过 stderr 输出
+
+## 🔄 更新日志
+
+### v1.1.0 (2026-04-15)
+- ✨ 新增持久化 Python 进程模式，大幅提升性能
+- ✨ 新增健康检查工具 `csmar_health_check`
+- ✨ 实现了 `get_stock_data`、`get_financial_data`、`get_company_info` 工具
+- 🔧 修复 Python 路径硬编码问题，自动检测 site-packages
+- 🔧 修复 zod 导入问题
+- 🔧 添加请求重试机制
+- 🔧 添加优雅关闭支持
+
+### v1.0.0
+- 🎉 初始版本
 
 ## 🤝 贡献
 
@@ -245,7 +305,7 @@ mcp__csmar__csmar_query(
 ## 📞 支持
 
 - **CSMAR 官方支持**：service@gtadata.com，400-888-3636
-- **项目 Issues**：[GitHub Issues](https://github.com/yourusername/csmar-mcp-server/issues)
+- **项目 Issues**：[GitHub Issues](https://github.com/ww11-max/Csmar-MCP-server/issues)
 - **文档**：查看 `docs/` 目录下的详细指南
 
 ---

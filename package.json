@@ -1,16 +1,37 @@
 {
   "name": "csmar-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for CSMAR (China Stock Market & Accounting Research) database",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js",
+    "test": "echo '{\"action\":\"check_availability\",\"params\":{}}' | python src/python_client.py --once",
+    "test:persistent": "python src/python_client.py"
+  },
+  "engines": {
+    "node": ">=18",
+    "python": ">=3.8"
+  },
+  "keywords": [
+    "mcp",
+    "csmar",
+    "financial",
+    "data",
+    "china",
+    "stock",
+    "accounting"
+  ],
+  "author": "ww11-max",
+  "license": "MIT",
+  "homepage": "https://github.com/ww11-max/Csmar-MCP-server",
+  "bugs": {
+    "url": "https://github.com/ww11-max/Csmar-MCP-server/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0",
-    "axios": "^1.6.0"
+    "zod": "^3.22.0"
   },
-  "keywords": ["mcp", "csmar", "financial", "data", "china"],
-  "author": "",
-  "license": "MIT"
+  "optionalDependencies": {
+    "axios": "^1.6.0"
+  }
 }

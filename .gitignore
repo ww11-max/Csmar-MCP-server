@@ -6,6 +6,8 @@ yarn-error.log*
 
 # Environment variables and secrets
 .env
+.env.local
+.env.*.local
 token.txt
 *.key
 *.pem
@@ -29,23 +31,28 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-.env/
 venv/
 ENV/
 env/
 .vscode/
+*.egg-info/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.swn
 
 # Test and temporary files
 test_output/
 tmp/
 temp/
+*.tmp
 
 # Project specific
 mcp-servers/csmar-server/csmar-log.log
 csmar-log.log
+
+# Config files with secrets (uncomment if needed)
+# config/.env
