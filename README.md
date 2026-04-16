@@ -9,14 +9,16 @@
 
 - **完整的 CSMAR 数据访问**：支持 240+ 个数据库，包括财务报表、股票交易、公司信息等
 - **智能登录管理**：支持环境变量自动登录和令牌缓存
-- **11 个 MCP 工具**：涵盖数据库探索、数据查询、预览等全功能
+- **10 个 MCP 工具**：涵盖数据库探索、数据查询、预览等全功能
 - **Python 中间层**：基于 CSMAR-PYTHON SDK 的稳定封装
 - **配置简单**：一键式配置，支持 Claude Code 原生集成
 
 ## 📋 前提条件
 
-1. **CSMAR 账号**：有效的 CSMAR（国泰安）机构账号
-2. **Python 3.8+**：需要安装 CSMAR-PYTHON SDK
+1. **CSMAR 账号**：有效的 CSMAR（国泰安）机构账号（个人或机构账号均可）
+2. **Python 3.8+**：需要安装 CSMAR-PYTHON SDK 及其依赖
+   - 安装 Python 依赖：`pip install urllib3 websocket websocket_client pandas prettytable`
+   - 下载并安装 CSMAR-PYTHON SDK（从官网或联系 CSMAR 获取）
 3. **Node.js 18+**：运行 MCP 服务器
 4. **Claude Code**：最新版本的 Claude Code 编辑器
 
@@ -30,7 +32,15 @@ cd csmar-mcp-server
 
 ### 2. 安装依赖
 ```bash
+# 安装Node.js依赖
 npm install
+
+# 安装Python依赖（CSMAR SDK所需）
+pip install urllib3 websocket websocket_client pandas prettytable
+
+# 安装CSMAR-PYTHON SDK
+# 从CSMAR官网下载SDK压缩包，解压到Python的site-packages目录
+# 或者按照官方文档安装：https://www.gtadata.com/products/csmar-api
 ```
 
 ### 3. 配置环境变量

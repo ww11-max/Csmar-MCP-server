@@ -49,3 +49,6 @@ temp/
 # Project specific
 mcp-servers/csmar-server/csmar-log.log
 csmar-log.log
+
+# User scripts and generated data
+user_scripts/

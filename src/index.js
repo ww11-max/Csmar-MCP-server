@@ -165,19 +165,44 @@ server.registerTool(
   },
   async ({ stock_code, start_date, end_date, indicators = [] }) => {
     try {
+      // 确保已登录
+      const loginResult = await ensureLogin();
+      if (!loginResult.success) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(loginResult, null, 2)
+            }
+          ],
+          isError: true
+        };
+      }
+
+      // 构建查询条件 - 尝试查询财务报表
+      // 默认使用FS_Combas表（合并资产负债表）
+      const tableName = "FS_Combas";
+      const condition = `Stkcd='${stock_code}' AND Accper>='${start_date}' AND Accper<='${end_date}'`;
+
+      // 如果指定了指标，使用它们作为列，否则使用常见财务指标
+      const columns = indicators.length > 0 ? indicators : [
+        'Stkcd', 'ShortName', 'Accper', 'Typrep', 'A001000000', 'A002000000'
+      ];
+
+      const result = await callPythonClient('query', {
+        table_name: tableName,
+        columns: columns,
+        condition: condition,
+        start_time: start_date,
+        end_time: end_date,
+        format: 'json'
+      });
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              stock_code,
-              start_date,
-              end_date,
-              indicators,
-              message: 'CSMAR API调用需要配置API密钥和文档',
-              api_base: CSMAR_API_BASE,
-              has_api_key: !!CSMAR_API_KEY,
-            }, null, 2)
+            text: JSON.stringify(result, null, 2)
           }
         ]
       };
@@ -186,7 +211,7 @@ server.registerTool(
         content: [
           {
             type: 'text',
-            text: `错误: ${error.message}`
+            text: `获取财务数据错误: ${error.message}\n\n提示：您也可以直接使用 csmar_query 工具查询特定表`
           }
         ],
         isError: true
@@ -209,17 +234,58 @@ server.registerTool(
   },
   async ({ stock_code, start_date, end_date, frequency = 'daily' }) => {
     try {
+      // 确保已登录
+      const loginResult = await ensureLogin();
+      if (!loginResult.success) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(loginResult, null, 2)
+            }
+          ],
+          isError: true
+        };
+      }
+
+      // 根据频率选择表名
+      let tableName;
+      switch (frequency) {
+        case 'daily':
+          tableName = "Trd_Dalyr"; // 股票日行情表
+          break;
+        case 'weekly':
+          tableName = "Trd_Week"; // 股票周行情表（假设）
+          break;
+        case 'monthly':
+          tableName = "Trd_Month"; // 股票月行情表（假设）
+          break;
+        default:
+          tableName = "Trd_Dalyr";
+      }
+
+      const condition = `Stkcd='${stock_code}' AND Trddt>='${start_date}' AND Trddt<='${end_date}'`;
+
+      // 常用股票交易字段
+      const columns = [
+        'Stkcd', 'ShortName', 'Trddt', 'Opnprc', 'Hiprc', 'Loprc', 'Clsprc',
+        'Dnshrtrd', 'Dnvaltrd', 'Adjprcwd', 'Adjprcnd'
+      ];
+
+      const result = await callPythonClient('query', {
+        table_name: tableName,
+        columns: columns,
+        condition: condition,
+        start_time: start_date,
+        end_time: end_date,
+        format: 'json'
+      });
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              stock_code,
-              start_date,
-              end_date,
-              frequency,
-              message: 'CSMAR API调用需要配置API密钥和文档',
-            }, null, 2)
+            text: JSON.stringify(result, null, 2)
           }
         ]
       };
@@ -228,7 +294,7 @@ server.registerTool(
         content: [
           {
             type: 'text',
-            text: `错误: ${error.message}`
+            text: `获取股票数据错误: ${error.message}\n\n提示：您也可以直接使用 csmar_query 工具查询特定表`
           }
         ],
         isError: true
@@ -248,17 +314,44 @@ server.registerTool(
   },
   async ({ stock_code }) => {
     try {
+      // 确保已登录
+      const loginResult = await ensureLogin();
+      if (!loginResult.success) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(loginResult, null, 2)
+            }
+          ],
+          isError: true
+        };
+      }
+
+      // 查询公司基本信息表
+      const tableName = "上市公司基本信息"; // 或 Company_Info
+      const condition = `Stkcd='${stock_code}'`;
+
+      // 常用公司信息字段
+      const columns = [
+        'Stkcd', 'ShortName', 'FullName', 'EngName', 'Listdt',
+        'Industry', 'Province', 'City', 'Address', 'Postcode',
+        'Phone', 'Fax', 'Email', 'Website', 'LegalRepresentative',
+        'RegisteredCapital', 'PaidinCapital'
+      ];
+
+      const result = await callPythonClient('query', {
+        table_name: tableName,
+        columns: columns,
+        condition: condition,
+        format: 'json'
+      });
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({
-              stock_code,
-              company_name: '示例公司',
-              industry: '示例行业',
-              listing_date: '2010-01-01',
-              message: 'CSMAR API调用需要配置API密钥和文档',
-            }, null, 2)
+            text: JSON.stringify(result, null, 2)
           }
         ]
       };
@@ -267,7 +360,7 @@ server.registerTool(
         content: [
           {
             type: 'text',
-            text: `错误: ${error.message}`
+            text: `获取公司信息错误: ${error.message}\n\n提示：您也可以直接使用 csmar_query 工具查询特定表`
           }
         ],
         isError: true
