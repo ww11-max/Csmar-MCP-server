@@ -65,7 +65,7 @@ CSMAR_LANG=0  # 0=中文, 1=英文
 
 > ⚠️ **安全提示**：请勿将 `.env` 文件提交到 Git！已配置 `.gitignore` 自动忽略。
 
-### 4. 配置 Claude Code
+### 4. 配置 Claude Code(包含Claude客户端和vscode扩展两种配置方式)
 
 在 Claude Code 的配置文件中添加 MCP 服务器配置：
 
@@ -106,6 +106,28 @@ CSMAR_LANG=0  # 0=中文, 1=英文
   }
 }
 ```
+如果用户使用的是VS code中的Claude code扩展，配置方式如下：
+
+配置env文件之后，修改Claude Code MCP配置
+VSCode 中 Claude Code 的 MCP 配置文件在：
+%APPDATA%/Code/User/globalStorage/saoudval.claude-code/mcp.json
+
+或者在 VSCode 设置中搜索 MCP，找到 MCP Servers 配置入口
+添加配置：
+{
+  "mcpServers": {
+    "csmar": {
+      "command": "node",
+      "args": ["C:\\path\\to\\Csmar-MCP-server\\src\\index.js"],###引号内替换为你实际克隆项目的路径
+      "env": {
+        "CSMAR_API_BASE": "https://api.gtarsc.com",
+        "CSMAR_USERNAME": "你的CSMAR用户名",
+        "CSMAR_PASSWORD": "你的CSMAR密码",
+        "CSMAR_LANG": "0"
+      }
+    }
+  }
+}
 
 ### 5. 重启 Claude Code
 
