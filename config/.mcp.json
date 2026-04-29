@@ -2,12 +2,11 @@
   "mcpServers": {
     "csmar": {
       "command": "node",
-      "args": ["src/index.js"],
+      "args": ["CSMAR-MCP/src/index.js"],
       "env": {
-        "CSMAR_API_BASE": "https://api.gtarsc.com",
-        "CSMAR_API_KEY": "",
-        "CSMAR_USERNAME": "your username",
-        "CSMAR_PASSWORD": "your password",
+        "PYTHON_PATH": "",
+        "CSMAR_USERNAME": "your_csmar_username",
+        "CSMAR_PASSWORD": "your_csmar_password",
         "CSMAR_LANG": "0"
       }
     }

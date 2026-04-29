@@ -2,33 +2,114 @@
  * CSMAR MCP Server
  * 国泰安(CSMAR)金融数据库的 Model Context Protocol 服务器
  * 支持在 Claude Code 中直接访问 CSMAR 金融数据
+ *
+ * 优化记录 (v1.2.0):
+ *   - 自动检测 Python 路径 (支持 Windows/Mac/Linux)
+ *   - 启动前环境检查 (pre-flight check)
+ *   - 更清晰的错误提示和排障建议
+ *   - 支持 PYTHON_PATH 环境变量覆盖自动检测
  */
 
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
-const { spawn } = require('child_process');
-const readline = require('readline');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+// ==================== Python 自动检测 ====================
+function detectPythonPath() {
+    // 1. 优先使用环境变量
+    if (process.env.PYTHON_PATH) {
+        return process.env.PYTHON_PATH;
+    }
+
+    // 2. 尝试 which/where 命令
+    const candidates = [];
+    try {
+        if (process.platform === 'win32') {
+            const result = execSync('where python 2>nul', { encoding: 'utf-8', shell: 'cmd.exe' });
+            candidates.push(...result.trim().split('\r\n').map(s => s.trim()).filter(Boolean));
+            const result3 = execSync('where python3 2>nul', { encoding: 'utf-8', shell: 'cmd.exe' });
+            candidates.push(...result3.trim().split('\r\n').map(s => s.trim()).filter(Boolean));
+        } else {
+            const result = execSync('which python3 python 2>/dev/null', { encoding: 'utf-8' });
+            candidates.push(...result.trim().split('\n').map(s => s.trim()).filter(Boolean));
+        }
+    } catch (e) { /* ignore */ }
+
+    // 3. 常见安装路径
+    const commonPaths = process.platform === 'win32' ? [
+        'D:\\python\\python.exe', 'D:\\Python313\\python.exe',
+        'D:\\Python312\\python.exe', 'D:\\Python311\\python.exe',
+        'C:\\Python314\\python.exe', 'C:\\Python313\\python.exe',
+        'C:\\Python312\\python.exe', 'C:\\Python311\\python.exe',
+        'C:\\Python310\\python.exe',
+        'C:\\Program Files\\Python313\\python.exe',
+        'C:\\Program Files\\Python312\\python.exe',
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe'),
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'python.exe'),
+    ] : [
+        '/usr/bin/python3', '/usr/local/bin/python3',
+        '/usr/bin/python', '/usr/local/bin/python',
+        path.join(os.homedir(), '.pyenv', 'shims', 'python3'),
+        path.join(os.homedir(), '.pyenv', 'shims', 'python'),
+    ];
+
+    for (const p of commonPaths) {
+        if (p && !candidates.includes(p) && fs.existsSync(p)) {
+            candidates.push(p);
+        }
+    }
+
+    // 4. 验证每个候选: 检查是否能导入 CSMAR SDK
+    for (const pyPath of candidates) {
+        try {
+            const checkCmd = process.platform === 'win32'
+                ? `"${pyPath}" -c "from csmarapi.CsmarService import CsmarService; print('OK')" 2>&1`
+                : `'${pyPath}' -c "from csmarapi.CsmarService import CsmarService; print('OK')" 2>&1`;
+            const result = execSync(checkCmd, { encoding: 'utf-8', timeout: 5000, shell: true });
+            if (result.includes('OK')) {
+                console.error(`[CSMAR] 自动检测到 Python (含CSMAR SDK): ${pyPath}`);
+                return pyPath;
+            }
+        } catch (e) { /* 该候选不可用 */ }
+    }
+
+    // 5. 回退: 返回第一个可用的 python
+    for (const pyPath of candidates) {
+        try {
+            const result = execSync(`"${pyPath}" --version 2>&1`, { encoding: 'utf-8', timeout: 3000, shell: true });
+            if (result.includes('Python')) {
+                console.error(`[CSMAR] 使用 Python (未检测到CSMAR SDK): ${pyPath}`);
+                return pyPath;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    return 'python'; // 最终回退
+}
 
 // ==================== 配置 ====================
 const CONFIG = {
     name: 'csmar-server',
-    version: '1.1.0',
+    version: '1.2.0',
     description: 'MCP server for CSMAR (China Stock Market & Accounting Research) database',
-    
-    // CSMAR API 配置
+
+    // CSMAR API
     apiBase: process.env.CSMAR_API_BASE || 'https://api.gtarsc.com',
     apiKey: process.env.CSMAR_API_KEY,
-    
+
     // 登录凭据
-    username: process.env.CSMAR_USERNAME,
-    password: process.env.CSMAR_PASSWORD,
+    username: process.env.CSMAR_USERNAME || '',
+    password: process.env.CSMAR_PASSWORD || '',
     lang: process.env.CSMAR_LANG || '0',
-    
-    // Python 客户端路径
+
+    // Python 客户端路径 (自动检测)
+    pythonPath: detectPythonPath(),
     pythonClientPath: path.join(__dirname, 'python_client.py'),
-    
+
     // 重试配置
     maxRetries: 3,
     retryDelay: 1000,
@@ -52,7 +133,7 @@ class PersistentPythonClient {
     
     async start() {
         return new Promise((resolve, reject) => {
-            this.process = spawn('python', [CONFIG.pythonClientPath], {
+            this.process = spawn(CONFIG.pythonPath, [CONFIG.pythonClientPath], {
                 stdio: ['pipe', 'pipe', 'pipe']
             });
             
@@ -675,20 +756,98 @@ async function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+// ==================== 启动前环境检查 ====================
+async function preFlightCheck() {
+    const checks = [];
+    const warnings = [];
+
+    // 检查 Node.js 版本
+    const nodeMajor = parseInt(process.version.slice(1).split('.')[0], 10);
+    if (nodeMajor < 18) {
+        checks.push({ pass: false, msg: `Node.js 版本过低: ${process.version}, 需要 >= 18.0.0` });
+    } else {
+        checks.push({ pass: true, msg: `Node.js ${process.version}` });
+    }
+
+    // 检查 Python
+    try {
+        const pyVersion = execSync(`"${CONFIG.pythonPath}" --version 2>&1`, { encoding: 'utf-8', timeout: 5000, shell: true });
+        checks.push({ pass: true, msg: `Python: ${pyVersion.trim()}` });
+    } catch (e) {
+        checks.push({
+            pass: false,
+            msg: `Python 不可用: ${CONFIG.pythonPath}`,
+            fix: '请设置 PYTHON_PATH 环境变量指向正确的 Python 可执行文件，或确保 python 在 PATH 中'
+        });
+    }
+
+    // 检查 CSMAR SDK
+    try {
+        const checkCmd = `"${CONFIG.pythonPath}" -c "from csmarapi.CsmarService import CsmarService; print('OK')" 2>&1`;
+        const result = execSync(checkCmd, { encoding: 'utf-8', timeout: 10000, shell: true });
+        if (result.includes('OK')) {
+            checks.push({ pass: true, msg: 'CSMAR Python SDK: 已安装' });
+        } else {
+            throw new Error('SDK check failed');
+        }
+    } catch (e) {
+        checks.push({
+            pass: false,
+            msg: 'CSMAR Python SDK 未安装或不可用',
+            fix: '请从学校图书馆或CSMAR技术支持获取 csmarapi SDK，解压到 Python 的 site-packages 目录'
+        });
+    }
+
+    // 检查凭据
+    if (!CONFIG.username || !CONFIG.password) {
+        warnings.push({
+            msg: '未配置 CSMAR 登录凭据 (CSMAR_USERNAME / CSMAR_PASSWORD)',
+            fix: '请在 .mcp.json 的 env 中设置 CSMAR_USERNAME 和 CSMAR_PASSWORD'
+        });
+    }
+
+    // 输出检查结果
+    console.error('[CSMAR] ========== 环境检查 ==========');
+    let allPass = true;
+    for (const c of checks) {
+        const icon = c.pass ? 'OK' : 'FAIL';
+        console.error(`[CSMAR]   [${icon}] ${c.msg}`);
+        if (!c.pass) {
+            allPass = false;
+            if (c.fix) console.error(`[CSMAR]         -> ${c.fix}`);
+        }
+    }
+    for (const w of warnings) {
+        console.error(`[CSMAR]   [WARN] ${w.msg}`);
+        if (w.fix) console.error(`[CSMAR]         -> ${w.fix}`);
+    }
+    console.error('[CSMAR] ================================');
+
+    if (!allPass) {
+        console.error('[CSMAR] 环境检查未通过，但服务器仍将尝试启动。');
+    }
+}
+
 // ==================== 启动服务器 ====================
 
 async function main() {
-    console.error(`[CSMAR] MCP Server v${CONFIG.version} 启动中...`);
-    
+    console.error(`[CSMAR] MCP Server v${CONFIG.version} (Node ${process.version} | ${process.platform})`);
+
+    await preFlightCheck();
+
     try {
-        // 预热 Python 客户端
+        console.error(`[CSMAR] 使用 Python: ${CONFIG.pythonPath}`);
         await initPythonClient();
-        
+
         const transport = new StdioServerTransport();
         await server.connect(transport);
-        console.error('[CSMAR] CSMAR MCP Server running on stdio');
+        console.error('[CSMAR] MCP Server 已就绪');
     } catch (error) {
         console.error('[CSMAR] 启动失败:', error.message);
+        console.error('[CSMAR] 排障建议:');
+        console.error('[CSMAR]   1. 检查 Python 路径是否正确: PYTHON_PATH=' + CONFIG.pythonPath);
+        console.error('[CSMAR]   2. 验证 CSMAR SDK 安装: python -c "from csmarapi.CsmarService import CsmarService"');
+        console.error('[CSMAR]   3. 运行手动测试: node src/setup.js');
         process.exit(1);
     }
 }
