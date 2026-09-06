@@ -20,6 +20,8 @@ import logging
 import os
 import argparse
 import site
+import datetime
+import decimal
 from typing import Dict, Any, Optional, List
 
 # ==================== Python 路径自动检测 ====================
@@ -159,18 +161,56 @@ class CSMARClient:
         self._try_load_token()
 
     def _try_load_token(self):
-        """尝试从多个位置加载 token.txt"""
-        search_paths = [
+        """尝试从多个位置加载 token.txt。
+
+        SDK 的 writeToken(token, lang, belong) 固定写三行: 第 1 行是 token,
+        第 2/3 行是 lang 和 belong。登录失败时它同样会写文件, 只是 token 为空,
+        留下形如 "\\r\\n0\\r\\n0" 的残留。
+
+        因此判断登录状态必须看第 1 行的 token 是否非空:
+        只看"文件是否存在"或"文件是否为空"都会把登录失败后的残留误判成已登录,
+        之后所有工具都会跳过登录直接查询, 然后静默失败。
+        """
+        # 去重, 否则 cwd 与父目录指向同一处时会重复读、重复打日志
+        search_paths = []
+        for sp in [
             os.getcwd(),
             os.path.dirname(os.path.abspath(__file__)),
             os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
-        ]
+        ]:
+            if sp not in search_paths:
+                search_paths.append(sp)
+
+        # SDK 的 writeToken 用相对路径写 token.txt, 实际落在进程的 cwd 下;
+        # 另外它自身也可能被放在 csmarapi 包目录里。
+        try:
+            import csmarapi
+            sdk_dir = os.path.dirname(os.path.abspath(csmarapi.__file__))
+            if sdk_dir not in search_paths:
+                search_paths.append(sdk_dir)
+        except Exception:
+            pass
+
         for sp in search_paths:
             token_path = os.path.join(sp, "token.txt")
-            if os.path.exists(token_path):
-                self.logged_in = True
-                logger.info(f"找到 token.txt ({sp}), 假设已登录")
-                return
+            if not os.path.exists(token_path):
+                continue
+
+            try:
+                with open(token_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.read().splitlines()
+            except OSError as e:
+                logger.warning(f"读取 token.txt 失败 ({sp}): {e}")
+                continue
+
+            token = lines[0].strip() if lines else ""
+            if not token:
+                logger.info(f"token.txt 中 token 为空 ({sp}), 视为未登录")
+                continue
+
+            self.logged_in = True
+            logger.info(f"找到有效 token ({sp}), 视为已登录")
+            return
 
     def _ensure_csmar(self):
         if not self.csmar:
@@ -201,7 +241,9 @@ class CSMARClient:
                 }
 
             self.csmar = CsmarService()
-            lang_code = 0 if lang == "1" else 1
+            # SDK 约定 (见 CsmarService.login 文档): lang 为字符串,
+            # "0"=简体, "1"=英文, "2"=繁体。传 int 会被 SDK 判定非法并回退为简体。
+            lang_code = lang if lang in ("0", "1", "2") else "0"
             result = self.csmar.login(account, pwd, lang_code)
 
             if result is None:
@@ -306,6 +348,35 @@ class CSMARClient:
             return {"success": False, "error": f"预览数据失败: {str(e)}"}
 
 
+def json_safe(obj: Any) -> Any:
+    """把 pandas / numpy 等对象转成可 JSON 序列化的结构。
+
+    SDK 的 query / preview 可能直接返回 DataFrame 或 numpy 标量，
+    直接 json.dumps 会抛 TypeError，导致调用方只能看到一个笼统的错误。
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+
+    for attr in ("to_dict", "tolist", "item"):
+        if hasattr(obj, attr):
+            try:
+                if attr == "to_dict":
+                    return json_safe(obj.to_dict("records"))
+                return json_safe(getattr(obj, attr)())
+            except Exception:
+                pass
+
+    return str(obj)
+
+
 def handle_command(command: Dict[str, Any], client: CSMARClient) -> Dict[str, Any]:
     action = command.get("action")
     params = command.get("params", {})
@@ -337,10 +408,14 @@ def handle_command(command: Dict[str, Any], client: CSMARClient) -> Dict[str, An
     }
 
     handler = handlers.get(action)
-    if handler:
-        return handler()
+    if handler is None:
+        return {"success": False, "error": f"未知动作: {action}", "supported_actions": list(handlers.keys())}
 
-    return {"success": False, "error": f"未知动作: {action}", "supported_actions": list(handlers.keys())}
+    try:
+        return handler()
+    except Exception as e:
+        logger.error(f"执行 {action} 失败: {e}\n{traceback.format_exc()}")
+        return {"success": False, "error": f"执行 {action} 失败: {str(e)}"}
 
 
 def main():
@@ -355,7 +430,7 @@ def main():
             input_data = sys.stdin.read()
             command = json.loads(input_data)
             result = handle_command(command, client)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(json.dumps(json_safe(result), ensure_ascii=False))
         except json.JSONDecodeError as e:
             print(json.dumps({"success": False, "error": f"JSON解析错误: {str(e)}"}, ensure_ascii=False))
         except Exception as e:
@@ -372,7 +447,7 @@ def main():
                     break
                 command = json.loads(line.strip())
                 result = handle_command(command, client)
-                print(json.dumps(result, ensure_ascii=False, indent=2))
+                print(json.dumps(json_safe(result), ensure_ascii=False))
                 sys.stdout.flush()
             except json.JSONDecodeError:
                 print(json.dumps({"success": False, "error": "JSON解析错误"}, ensure_ascii=False))

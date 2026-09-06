@@ -124,17 +124,25 @@ if (detectedPython) {
     // 测试网络连通性
     check('CSMAR 服务器连通性', () => {
         try {
-            const pyCode = `
-import urllib.request, ssl
-ctx = ssl.create_default_context()
-try:
-    req = urllib.request.Request("https://data.csmar.com", headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-        print("OK")
-except Exception as e:
-    print("FAIL:" + str(e))
-`;
-            const r = execSync(`"${detectedPython}" -c "${pyCode}" 2>&1`, { encoding: 'utf-8', timeout: 15000, shell: true });
+            // 多行脚本必须走 stdin: 塞进 `python -c "..."` 在 Windows 的 cmd 下
+            // 会因为换行和引号嵌套直接失败。
+            const pyCode = [
+                'import urllib.request, ssl',
+                'ctx = ssl.create_default_context()',
+                'try:',
+                '    req = urllib.request.Request("https://data.csmar.com", headers={"User-Agent": "Mozilla/5.0"})',
+                '    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:',
+                '        print("OK")',
+                'except Exception as e:',
+                '    print("FAIL:" + str(e))',
+                ''
+            ].join('\n');
+            const r = execSync(`"${detectedPython}" -`, {
+                encoding: 'utf-8',
+                timeout: 15000,
+                input: pyCode,
+                shell: true
+            });
             return { pass: r.includes('OK'), msg: r.includes('OK') ? '可连接' : r.trim() };
         } catch (e) {
             return { pass: false, msg: e.message, fix: '请检查网络连接' };
@@ -147,12 +155,27 @@ check('.env 配置', () => {
     const envPath = path.join(__dirname, '..', '.env');
     if (fs.existsSync(envPath)) {
         const content = fs.readFileSync(envPath, 'utf-8');
-        const hasUser = content.includes('CSMAR_USERNAME=') && !content.includes('CSMAR_USERNAME=\n') && !content.includes('CSMAR_USERNAME=your_');
-        const hasPwd = content.includes('CSMAR_PASSWORD=') && !content.includes('CSMAR_PASSWORD=\n') && !content.includes('CSMAR_PASSWORD=your_');
+
+        // 逐行解析，不能依赖字符串包含判断: Windows 的 .env 通常是 CRLF,
+        // 用 includes('CSMAR_USERNAME=\n') 之类的判断会失效。
+        const values = {};
+        for (const rawLine of content.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (!line || line.startsWith('#')) continue;
+            const eq = line.indexOf('=');
+            if (eq === -1) continue;
+            values[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+        }
+
+        const isPlaceholder = (v) => !v || v.startsWith('your_') || v.startsWith('填写');
+        const user = values['CSMAR_USERNAME'] || '';
+        const pwd = values['CSMAR_PASSWORD'] || '';
+        const ok = !isPlaceholder(user) && !isPlaceholder(pwd);
+
         return {
-            pass: hasUser && hasPwd,
-            msg: hasUser && hasPwd ? '凭据已配置' : '凭据未配置或使用占位符',
-            fix: hasUser && hasPwd ? undefined : '编辑 .env 文件，填入 CSMAR_USERNAME 和 CSMAR_PASSWORD'
+            pass: ok,
+            msg: ok ? '凭据已配置' : '凭据未配置或使用占位符',
+            fix: ok ? undefined : '编辑 .env 文件，填入 CSMAR_USERNAME 和 CSMAR_PASSWORD'
         };
     }
     return {

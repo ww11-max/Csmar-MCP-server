@@ -18,6 +18,40 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// ==================== .env 加载 ====================
+// 从项目根目录的 .env 读取配置。进程里已有的环境变量优先级更高，不会被覆盖。
+function loadDotEnv() {
+    const envPath = path.join(__dirname, '..', '.env');
+    if (!fs.existsSync(envPath)) return;
+
+    try {
+        const content = fs.readFileSync(envPath, 'utf-8');
+        for (const rawLine of content.split(/\r?\n/)) {
+            const line = rawLine.trim();
+            if (!line || line.startsWith('#')) continue;
+
+            const eq = line.indexOf('=');
+            if (eq === -1) continue;
+
+            const key = line.slice(0, eq).trim();
+            let value = line.slice(eq + 1).trim();
+            if ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))) {
+                value = value.slice(1, -1);
+            }
+
+            if (key && process.env[key] === undefined) {
+                process.env[key] = value;
+            }
+        }
+    } catch (e) {
+        console.error('[CSMAR] 读取 .env 失败:', e.message);
+    }
+}
+
+// 必须在 detectPythonPath() 之前执行，.env 里的 PYTHON_PATH 才能生效
+loadDotEnv();
+
 // ==================== Python 自动检测 ====================
 function detectPythonPath() {
     // 1. 优先使用环境变量
@@ -127,8 +161,10 @@ class PersistentPythonClient {
     constructor() {
         this.process = null;
         this.ready = false;
-        this.commandQueue = [];
+        this.commandQueue = [];   // 等待发送
+        this.pending = [];        // 已发送、等待回包
         this.currentCommand = null;
+        this.requestTimeout = 60000;
     }
     
     async start() {
@@ -137,11 +173,16 @@ class PersistentPythonClient {
                 stdio: ['pipe', 'pipe', 'pipe']
             });
             
-            let stderr = '';
             let stdoutBuffer = '';
             
+            // Python 侧的日志与堆栈直接转发，否则排障时看不到任何底层错误
             this.process.stderr.on('data', (data) => {
-                stderr += data.toString();
+                const text = data.toString();
+                if (text.trim()) {
+                    for (const line of text.split(/\r?\n/)) {
+                        if (line.trim()) console.error('[Python]', line);
+                    }
+                }
             });
             
             this.process.stdout.on('data', (data) => {
@@ -158,67 +199,116 @@ class PersistentPythonClient {
                 }
             });
             
-            this.process.on('error', (error) => {
-                console.error('[CSMAR] Python 进程启动失败:', error.message);
-                reject(error);
-            });
-            
-            this.process.on('close', (code) => {
-                console.error(`[CSMAR] Python 进程退出: ${code}`);
-                this.ready = false;
-            });
-            
             // 等待 ready 信号
             const timeout = setTimeout(() => {
                 reject(new Error('Python 客户端启动超时'));
             }, 30000);
             
+            let settled = false;
+            const fail = (error) => {
+                clearTimeout(timeout);
+                this.ready = false;
+                this.rejectAllPending(error);
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+            };
+            
             this.onReady = () => {
                 clearTimeout(timeout);
                 this.ready = true;
+                settled = true;
                 console.error('[CSMAR] Python 客户端已就绪 (持久化模式)');
                 resolve();
             };
             
-            this.onResult = (result) => {
-                if (this.currentCommand) {
-                    this.currentCommand.resolve(result);
-                    this.currentCommand = null;
-                    this.processQueue();
-                }
-            };
+            this.process.on('error', (error) => {
+                console.error('[CSMAR] Python 进程启动失败:', error.message);
+                fail(error);
+            });
             
-            this.onError = (error) => {
-                if (this.currentCommand) {
-                    this.currentCommand.reject(error);
-                    this.currentCommand = null;
-                    this.processQueue();
+            // 进程一旦退出，所有在途请求必须立刻失败，否则调用方会一直挂起
+            this.process.on('close', (code) => {
+                console.error(`[CSMAR] Python 进程退出: ${code}`);
+                this.ready = false;
+                this.rejectAllPending(new Error(`Python 进程已退出 (code ${code})`));
+                if (!settled) {
+                    settled = true;
+                    reject(new Error(`Python 进程启动后立即退出 (code ${code})`));
                 }
-            };
+            });
         });
     }
     
+    // 进程崩溃或关闭时，唤醒所有还在等待的调用方
+    rejectAllPending(error) {
+        const all = this.pending.splice(0);
+        if (this.currentCommand) {
+            all.push(this.currentCommand);
+            this.currentCommand = null;
+        }
+        for (const item of all) {
+            clearTimeout(item.timer);
+            item.reject(error);
+        }
+        this.commandQueue.length = 0;
+    }
+    
     handleOutput(line) {
+        let data;
         try {
-            const data = JSON.parse(line);
-            
-            if (data.type === 'ready') {
-                this.onReady?.(data);
-            } else if (data.success === false && data.error) {
-                this.onError?.(new Error(data.error));
-            } else {
-                this.onResult?.(data);
-            }
+            data = JSON.parse(line);
         } catch (e) {
             // 非 JSON 输出，可能是日志
             if (line.includes('[CSMAR]') || line.includes('[ERROR]') || line.includes('[INFO]')) {
                 console.error('[Python]', line);
             }
+            return;
         }
+        
+        if (data.type === 'ready') {
+            this.onReady?.(data);
+            return;
+        }
+        
+        // 回包总是对应当前在途的那条命令（Python 侧串行处理，顺序一致）
+        const item = this.currentCommand;
+        if (!item) return;
+        
+        this.settleCurrent(data);
+    }
+    
+    // 结束当前在途请求并推进队列
+    settleCurrent(payload) {
+        const item = this.currentCommand;
+        this.currentCommand = null;
+        
+        if (!item) return;
+        
+        clearTimeout(item.timer);
+        const idx = this.pending.indexOf(item);
+        if (idx !== -1) this.pending.splice(idx, 1);
+        
+        if (payload && payload.success === false && payload.error) {
+            item.reject(new Error(payload.error));
+        } else {
+            item.resolve(payload);
+        }
+        
+        this.processQueue();
+    }
+    
+    // 摘除某个请求（超时用），不影响队列其余部分
+    removePending(item) {
+        const idx = this.pending.indexOf(item);
+        if (idx !== -1) this.pending.splice(idx, 1);
+        if (this.currentCommand === item) this.currentCommand = null;
     }
     
     processQueue() {
         if (this.currentCommand || this.commandQueue.length === 0) return;
+        if (!this.process || !this.ready) return;
         
         const next = this.commandQueue.shift();
         this.currentCommand = next;
@@ -226,10 +316,28 @@ class PersistentPythonClient {
         try {
             this.process.stdin.write(JSON.stringify(next.command) + '\n');
         } catch (e) {
-            next.reject(e);
             this.currentCommand = null;
+            clearTimeout(next.timer);
+            next.reject(e);
             this.processQueue();
         }
+    }
+    
+    // 单条命令入队。不覆写共享回调，因此并发调用不会互相顶掉。
+    enqueue(command) {
+        return new Promise((resolve, reject) => {
+            const item = { command, resolve, reject, timer: null };
+            
+            item.timer = setTimeout(() => {
+                this.removePending(item);
+                reject(new Error('请求超时'));
+                this.processQueue();
+            }, this.requestTimeout);
+            
+            this.pending.push(item);
+            this.commandQueue.push(item);
+            this.processQueue();
+        });
     }
     
     async call(action, params = {}, retries = CONFIG.maxRetries) {
@@ -237,53 +345,31 @@ class PersistentPythonClient {
             throw new Error('Python 客户端未就绪');
         }
         
-        return new Promise(async (resolve, reject) => {
-            const command = { action, params };
-            
-            for (let attempt = 0; attempt < retries; attempt++) {
-                try {
-                    const result = await new Promise((res, rej) => {
-                        const timeout = setTimeout(() => {
-                            rej(new Error('请求超时'));
-                        }, 60000);
-                        
-                        const originalOnResult = this.onResult;
-                        const originalOnError = this.onError;
-                        
-                        this.onResult = (data) => {
-                            clearTimeout(timeout);
-                            this.onResult = originalOnResult;
-                            this.onError = originalOnError;
-                            res(data);
-                        };
-                        
-                        this.onError = (error) => {
-                            clearTimeout(timeout);
-                            this.onError = originalOnError;
-                            this.onResult = originalOnResult;
-                            rej(error);
-                        };
-                        
-                        this.commandQueue.push({ command, resolve: res, reject: rej });
-                        this.processQueue();
-                    });
-                    
-                    resolve(result);
-                    return;
-                } catch (error) {
-                    if (attempt === retries - 1) {
-                        reject(error);
-                    } else {
-                        await new Promise(r => setTimeout(r, CONFIG.retryDelay * (attempt + 1)));
-                    }
+        const command = { action, params };
+        let lastError = null;
+        
+        for (let attempt = 0; attempt < retries; attempt++) {
+            try {
+                return await this.enqueue(command);
+            } catch (error) {
+                lastError = error;
+                // 进程已经没了，重试没有意义
+                if (!this.ready) break;
+                if (attempt < retries - 1) {
+                    await new Promise(r => setTimeout(r, CONFIG.retryDelay * (attempt + 1)));
                 }
             }
-        });
+        }
+        
+        throw lastError || new Error('请求失败');
     }
     
     stop() {
         if (this.process) {
-            this.process.stdin.end();
+            this.rejectAllPending(new Error('Python 客户端已停止'));
+            try {
+                this.process.stdin.end();
+            } catch (e) { /* 进程可能已退出 */ }
             this.process.kill();
             this.process = null;
             this.ready = false;
@@ -295,6 +381,12 @@ class PersistentPythonClient {
 let pythonClient = null;
 
 // ==================== 工具函数 ====================
+
+// 转义 SQL 字符串字面量中的单引号。
+// 股票代码等外部输入会被拼进 condition，不做转义会破坏查询条件。
+function escapeSqlString(value) {
+    return String(value).replace(/'/g, "''");
+}
 
 // 初始化 Python 客户端
 async function initPythonClient() {
@@ -575,7 +667,8 @@ server.registerTool(
 server.registerTool(
     'get_stock_data',
     {
-        description: '获取 CSMAR 股票交易数据',
+        description: '获取 CSMAR 股票交易数据。注意: 目前底层映射到日行情表，'
+            + 'daily 可直接用; weekly/monthly 需要在行情库中确认对应的周/月表名后改用 csmar_query。',
         inputSchema: {
             stock_code: z.string().describe('股票代码'),
             start_date: z.string().describe('开始日期 (YYYY-MM-DD)'),
@@ -590,21 +683,28 @@ server.registerTool(
                 return { content: [{ type: 'text', text: JSON.stringify(loginResult, null, 2) }], isError: true };
             }
             
-            // 映射频率参数
             const freqMap = { daily: 'D', weekly: 'W', monthly: 'M' };
             const freq = freqMap[frequency] || 'D';
             
-            // 使用通用查询获取股票数据
-            // 这里假设有一个股票日行情表，实际表名需要根据数据库确定
             const client = await initPythonClient();
             const result = await client.call('query', {
                 table_name: 'stock_daily',
                 columns: ['Stkcd', 'Trddt', 'Open', 'High', 'Low', 'Close', 'Vol', 'Amount'],
-                condition: `Stkcd='${stock_code}'`,
+                condition: `Stkcd='${escapeSqlString(stock_code)}'`,
                 start_time: start_date,
                 end_time: end_date,
                 limit: 1000
             });
+            
+            // 底层只映射了日行情表，其他频率必须如实告知，不能拿日线冒充
+            if (result && typeof result === 'object') {
+                result.frequency = frequency;
+                if (frequency !== 'daily') {
+                    result.frequency_warning =
+                        `当前底层表为日行情表，无法提供 ${frequency}(${freq}) 数据。` +
+                        '请先用 csmar_list_tables 查看行情库中的周/月表，再用 csmar_query 查询。';
+                }
+            }
             
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (error) {
@@ -639,7 +739,7 @@ server.registerTool(
             const result = await client.call('query', {
                 table_name: 'FS_Combas',
                 columns,
-                condition: `Stkcd='${stock_code}'`,
+                condition: `Stkcd='${escapeSqlString(stock_code)}'`,
                 start_time: start_date,
                 end_time: end_date,
                 limit: 100
@@ -674,7 +774,7 @@ server.registerTool(
             const result = await client.call('query', {
                 table_name: 'company_basic',
                 columns: ['Stkcd', 'ShortName', 'Industry', 'ListDate', 'Province', 'City'],
-                condition: `Stkcd='${stock_code}'`,
+                condition: `Stkcd='${escapeSqlString(stock_code)}'`,
                 limit: 1
             });
             
