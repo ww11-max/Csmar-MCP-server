@@ -667,8 +667,10 @@ server.registerTool(
 server.registerTool(
     'get_stock_data',
     {
-        description: '获取 CSMAR 股票交易数据。注意: 目前底层映射到日行情表，'
-            + 'daily 可直接用; weekly/monthly 需要在行情库中确认对应的周/月表名后改用 csmar_query。',
+        description: '获取 CSMAR 股票交易行情数据。底层映射到「股票市场交易」库的真实行情表:'
+            + ' daily→TRD_Dalyr(日个股交易), weekly→TRD_Week(周个股交易), monthly→TRD_Mnth(月个股交易)。'
+            + '返回字段含开盘/最高/最低/收盘价、成交量、成交金额、流通市值、总市值及回报率等。'
+            + '注意: 周表(TRD_Week)在 CSMAR 后端对较宽的结束日期偶尔返回空, 若遇到可缩小日期范围重试。',
         inputSchema: {
             stock_code: z.string().describe('股票代码'),
             start_date: z.string().describe('开始日期 (YYYY-MM-DD)'),
@@ -682,30 +684,36 @@ server.registerTool(
             if (!loginResult.success) {
                 return { content: [{ type: 'text', text: JSON.stringify(loginResult, null, 2) }], isError: true };
             }
-            
-            const freqMap = { daily: 'D', weekly: 'W', monthly: 'M' };
-            const freq = freqMap[frequency] || 'D';
-            
+
+            // 真实行情表 (CSMAR「股票市场交易」库) + 各自真实的字段名。
+            // 此前的仓库写的是臆造的 stock_daily, 且日/周/月共用一套不存在的列名。
+            const tableMap = { daily: 'TRD_Dalyr', weekly: 'TRD_Week', monthly: 'TRD_Mnth' };
+            const columnsMap = {
+                daily:   ['Stkcd', 'Trddt', 'Opnprc', 'Hiprc', 'Loprc', 'Clsprc',
+                          'Dnshrtrd', 'Dnvaltrd', 'Dsmvosd', 'Dsmvtll', 'Dretwd'],
+                weekly:  ['Stkcd', 'Trdwnt', 'Wopnprc', 'Wclsprc',
+                          'Wnshrtrd', 'Wnvaltrd', 'Wsmvosd', 'Wsmvttl', 'Wretwd'],
+                monthly: ['Stkcd', 'Trdmnt', 'Mopnprc', 'Mclsprc',
+                          'Mnshrtrd', 'Mnvaltrd', 'Msmvosd', 'Msmvttl', 'Mretwd'],
+            };
+            const table = tableMap[frequency] || 'TRD_Dalyr';
+            const columns = columnsMap[frequency] || columnsMap.daily;
+
             const client = await initPythonClient();
             const result = await client.call('query', {
-                table_name: 'stock_daily',
-                columns: ['Stkcd', 'Trddt', 'Open', 'High', 'Low', 'Close', 'Vol', 'Amount'],
+                table_name: table,
+                columns,
                 condition: `Stkcd='${escapeSqlString(stock_code)}'`,
                 start_time: start_date,
                 end_time: end_date,
                 limit: 1000
             });
-            
-            // 底层只映射了日行情表，其他频率必须如实告知，不能拿日线冒充
+
             if (result && typeof result === 'object') {
                 result.frequency = frequency;
-                if (frequency !== 'daily') {
-                    result.frequency_warning =
-                        `当前底层表为日行情表，无法提供 ${frequency}(${freq}) 数据。` +
-                        '请先用 csmar_list_tables 查看行情库中的周/月表，再用 csmar_query 查询。';
-                }
+                result.table = table;
             }
-            
+
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (error) {
             return { content: [{ type: 'text', text: `获取股票数据错误: ${error.message}` }], isError: true };
@@ -732,8 +740,9 @@ server.registerTool(
                 return { content: [{ type: 'text', text: JSON.stringify(loginResult, null, 2) }], isError: true };
             }
             
-            // 财务报表主表
-            const columns = indicators.length > 0 ? indicators : ['Stkcd', 'ShortName', 'Accper', 'Typrep', 'A001000000', 'A002000000'];
+            // 财务报表主表 (CSMAR「财务报表」库的 FS_Combas)。注意该表无 ShortName 列。
+            const columns = indicators.length > 0 ? indicators
+                : ['Stkcd', 'Accper', 'Typrep', 'A001000000', 'A002000000'];
             
             const client = await initPythonClient();
             const result = await client.call('query', {
@@ -756,7 +765,8 @@ server.registerTool(
 server.registerTool(
     'get_company_info',
     {
-        description: '获取公司基本信息',
+        description: '获取公司基本信息 (CSMAR「股票市场交易」库的 TRD_Co 公司文件表)。'
+            + '返回证券代码、证券简称、公司全称、行业名称、上市日期等。',
         inputSchema: {
             stock_code: z.string().describe('股票代码'),
         },
@@ -770,10 +780,10 @@ server.registerTool(
             
             const client = await initPythonClient();
             
-            // 尝试从公司基本信息表获取
+            // TRD_Co 公司文件表才是真实的公司基本信息表 (此前的 company_basic 为臆造表名, 不存在)
             const result = await client.call('query', {
-                table_name: 'company_basic',
-                columns: ['Stkcd', 'ShortName', 'Industry', 'ListDate', 'Province', 'City'],
+                table_name: 'TRD_Co',
+                columns: ['Stkcd', 'Stknme', 'Conme', 'Indnme', 'Listdt', 'Estbdt'],
                 condition: `Stkcd='${escapeSqlString(stock_code)}'`,
                 limit: 1
             });
